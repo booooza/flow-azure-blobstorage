@@ -18,9 +18,7 @@ use Doctrine\DBAL\Driver\Exception as DbalDriverException;
 use Doctrine\ORM\EntityManagerInterface;
 use Flownative\Azure\BlobStorage\AbsTarget;
 use Flownative\Azure\BlobStorage\BlobServiceFactory;
-use MicrosoftAzure\Storage\Blob\Models\CreateBlockBlobOptions;
-use MicrosoftAzure\Storage\Blob\Models\SetBlobPropertiesOptions;
-use MicrosoftAzure\Storage\Common\Exceptions\ServiceException;
+use AzureOss\Storage\Blob\Models\UploadBlobOptions;
 use Neos\Flow\Annotations as Flow;
 use Neos\Flow\Cli\CommandController;
 use Neos\Flow\ResourceManagement\ResourceManager;
@@ -55,7 +53,7 @@ final class AbsCommandController extends CommandController
     public function connectCommand(string $container): void
     {
         try {
-            $blobService = $this->blobServiceFactory->create();
+            $blobServiceClient = $this->blobServiceFactory->create();
         } catch (\Exception $e) {
             $this->outputLine('<error>%s</error>', [$e->getMessage()]);
             exit(1);
@@ -63,27 +61,33 @@ final class AbsCommandController extends CommandController
 
         $this->outputLine('Writing test object into container (%s) ...', [$container]);
         try {
-            $blobOptions = new CreateBlockBlobOptions();
-            $blobOptions->setContentType('text/plain');
-            $blobService->createBlockBlob($container, 'Flownative.Azure.BlobStorage.ConnectionTest.txt', 'I am a teapot', $blobOptions);
-        } catch (ServiceException $e) {
+            $containerClient = $blobServiceClient->getContainerClient($container);
+            $blobClient = $containerClient->getBlobClient('Flownative.Azure.BlobStorage.ConnectionTest.txt');
+            $options = new UploadBlobOptions(contentType: 'text/plain');
+            $blobClient->upload('I am a teapot', $options);
+        } catch (\Exception $e) {
             $this->outputLine('<error>%s</error>', [$e->getMessage()]);
             exit(1);
         }
 
         $this->outputLine('Retrieving test object from container ...');
         try {
-            $blob = $blobService->getBlob($container, 'Flownative.Azure.BlobStorage.ConnectionTest.txt');
-        } catch (ServiceException $e) {
+            $containerClient = $blobServiceClient->getContainerClient($container);
+            $blobClient = $containerClient->getBlobClient('Flownative.Azure.BlobStorage.ConnectionTest.txt');
+            $result = $blobClient->downloadStreaming();
+            $content = $result->content->getContents();
+        } catch (\Exception $e) {
             $this->outputLine('<error>%s</error>', [$e->getMessage()]);
             exit(1);
         }
-        $this->outputLine('Content read back: <em>%s</em>', [fread($blob->getContentStream(), 200)]);
+        $this->outputLine('Content read back: <em>%s</em>', [$content]);
 
         $this->outputLine('Deleting test object from container ...');
         try {
-            $blobService->deleteBlob($container, 'Flownative.Azure.BlobStorage.ConnectionTest.txt');
-        } catch (ServiceException $e) {
+            $containerClient = $blobServiceClient->getContainerClient($container);
+            $blobClient = $containerClient->getBlobClient('Flownative.Azure.BlobStorage.ConnectionTest.txt');
+            $blobClient->delete();
+        } catch (\Exception $e) {
             $this->outputLine('<error>%s</error>', [$e->getMessage()]);
             exit(1);
         }
@@ -149,7 +153,7 @@ final class AbsCommandController extends CommandController
         $this->outputLine();
 
         try {
-            $blobService = $this->blobServiceFactory->create();
+            $blobServiceClient = $this->blobServiceFactory->create();
         } catch (\Exception $e) {
             $this->outputLine('<error>%s</error>', [$e->getMessage()]);
             exit(1);
@@ -177,6 +181,7 @@ final class AbsCommandController extends CommandController
         }
 
         try {
+            $containerClient = $blobServiceClient->getContainerClient($targetContainer);
             $targetKeyPrefix = $target->getKeyPrefix();
             $previousSha1 = null;
             while ($resourceRecord = $queryResult->fetchAssociative()) {
@@ -185,12 +190,33 @@ final class AbsCommandController extends CommandController
                 }
                 $previousSha1 = $resourceRecord['sha1'];
 
-                $setBlobPropertiesOptions = new SetBlobPropertiesOptions();
-                $setBlobPropertiesOptions->setContentType($resourceRecord['mediatype']);
                 try {
-                    $blobService->setBlobProperties($targetContainer, $targetKeyPrefix . $resourceRecord['sha1'] . '/' . $resourceRecord['filename'], $setBlobPropertiesOptions);
-                    $this->outputLine('   ✅  %s %s ', [$resourceRecord['sha1'], $resourceRecord['filename']]);
-                } catch (ServiceException $exception) {
+                    $blobClient = $containerClient->getBlobClient($targetKeyPrefix . $resourceRecord['sha1'] . '/' . $resourceRecord['filename']);
+
+                    // Get current blob properties
+                    $properties = $blobClient->getProperties();
+                    $currentContentType = $properties->contentType;
+                    $expectedContentType = $resourceRecord['mediatype'];
+
+                    if ($currentContentType === $expectedContentType) {
+                        $this->outputLine('   ✅  %s %s (content-type: %s)', [$resourceRecord['sha1'], $resourceRecord['filename'], $currentContentType]);
+                    } else {
+                        // Content type mismatch - we need to re-upload the blob with correct content type
+                        $this->outputLine('   🔄  %s %s (updating content-type from "%s" to "%s")', [$resourceRecord['sha1'], $resourceRecord['filename'], $currentContentType, $expectedContentType]);
+
+                        // Download current content
+                        $downloadResult = $blobClient->downloadStreaming();
+                        $content = $downloadResult->content;
+
+                        // Re-upload with correct content type
+                        $options = new \AzureOss\Storage\Blob\Models\UploadBlobOptions(contentType: $expectedContentType);
+                        $blobClient->upload($content, $options);
+
+                        $this->outputLine('   ✅  %s %s (content-type updated)', [$resourceRecord['sha1'], $resourceRecord['filename']]);
+                    }
+                } catch (\AzureOss\Storage\Blob\Exceptions\BlobNotFoundException $exception) {
+                    $this->outputLine('   ❌  <error>%s %s (not found)</error>', [$resourceRecord['sha1'], $resourceRecord['filename']]);
+                } catch (\Exception $exception) {
                     $this->outputLine('   ❌  <error>%s %s</error>', [$resourceRecord['sha1'], $resourceRecord['filename']]);
                     $this->outputLine('      %s', [$exception->getMessage()]);
                 }

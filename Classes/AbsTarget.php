@@ -15,12 +15,11 @@ namespace Flownative\Azure\BlobStorage;
 
 use Flownative\Azure\BlobStorage\Exception as BlobStorageException;
 use GuzzleHttp\Psr7\Uri;
-use MicrosoftAzure\Storage\Blob\BlobRestProxy;
-use MicrosoftAzure\Storage\Blob\Models\CreateBlockBlobOptions;
-use MicrosoftAzure\Storage\Blob\Models\ListBlobsOptions;
-use MicrosoftAzure\Storage\Blob\Models\SetBlobPropertiesOptions;
-use MicrosoftAzure\Storage\Common\Exceptions\ServiceException;
-use MicrosoftAzure\Storage\Common\Internal\Resources;
+use AzureOss\Storage\Blob\BlobServiceClient;
+use AzureOss\Storage\Blob\BlobContainerClient;
+use AzureOss\Storage\Blob\Models\UploadBlobOptions;
+use AzureOss\Storage\Blob\Models\GetBlobsOptions;
+use AzureOss\Storage\Blob\Exceptions\BlobNotFoundException;
 use Neos\Error\Messages\Error;
 use Neos\Flow\Annotations as Flow;
 use Neos\Flow\Log\Utility\LogEnvironment;
@@ -41,7 +40,6 @@ use Psr\Log\LoggerInterface;
  */
 class AbsTarget implements TargetInterface
 {
-
     /**
      * Name of the Azure Blob Storage container which should be used for publication
      *
@@ -136,9 +134,14 @@ class AbsTarget implements TargetInterface
     protected $blobServiceFactory;
 
     /**
-     * @var BlobRestProxy
+     * @var BlobServiceClient
      */
-    protected $blobService;
+    protected $blobServiceClient;
+
+    /**
+     * @var BlobContainerClient
+     */
+    protected $containerClient;
 
     /**
      * @Flow\Inject
@@ -170,10 +173,10 @@ class AbsTarget implements TargetInterface
             switch ($key) {
                 case 'container':
                     $this->containerName = $value;
-                break;
+                    break;
                 case 'keyPrefix':
                     $this->keyPrefix = ltrim($value, '/');
-                break;
+                    break;
                 case 'persistentResourceUris':
                     if (!is_array($value)) {
                         throw new Exception(sprintf('The option "%s" which was specified in the configuration of the "%s" resource AbsTarget is not a valid array. Please check your settings.', $key, $name), 1621597002);
@@ -182,28 +185,28 @@ class AbsTarget implements TargetInterface
                         switch ($uriOptionKey) {
                             case 'pattern':
                                 $this->persistentResourceUriPattern = (string)$uriOptionValue;
-                            break;
+                                break;
                             case 'enableSigning':
                                 $this->persistentResourceUriEnableSigning = (bool)$uriOptionValue;
-                            break;
+                                break;
                             case 'signatureLifetime':
                                 $this->persistentResourceUriSignatureLifetime = (int)$uriOptionValue;
-                            break;
+                                break;
                             default:
                                 if ($uriOptionValue !== null) {
                                     throw new Exception(sprintf('An unknown option "%s" was specified in the configuration of the "%s" resource AbsTarget. Please check your settings.', $uriOptionKey, $name), 1621597006);
                                 }
                         }
                     }
-                break;
+                    break;
                 case 'corsAllowOrigin':
                     $this->corsAllowOrigin = $value;
-                break;
+                    break;
                 case 'baseUri':
                     if (!empty($value)) {
                         $this->baseUri = $value;
                     }
-                break;
+                    break;
                 case 'customBaseUriMethod':
                     if (!is_array($value)) {
                         throw new Exception(sprintf('The option "%s" which was specified in the configuration of the "%s" resource AbsTarget is not a valid array. Please check your settings.', $key, $name), 1621597146);
@@ -212,10 +215,10 @@ class AbsTarget implements TargetInterface
                         throw new Exception(sprintf('The option "%s" which was specified in the configuration of the "%s" resource AbsTarget requires exactly two keys ("objectName" and "methodName"). Please check your settings.', $key, $name), 1621597150);
                     }
                     $this->customBaseUriMethod = $value;
-                break;
+                    break;
                 case 'gzipCompressionLevel':
                     $this->gzipCompressionLevel = (int)$value;
-                break;
+                    break;
                 case 'gzipCompressionMediaTypes':
                     if (!is_array($value)) {
                         throw new Exception(sprintf('The option "%s" which was specified in the configuration of the "%s" resource AbsTarget is not a valid array. Please check your settings.', $key, $name), 1621597162);
@@ -226,7 +229,7 @@ class AbsTarget implements TargetInterface
                         }
                     }
                     $this->gzipCompressionMediaTypes = $value;
-                break;
+                    break;
                 default:
                     if ($value !== null) {
                         throw new Exception(sprintf('An unknown option "%s" was specified in the configuration of the "%s" resource AbsTarget. Please check your settings.', $key, $name), 1621597192);
@@ -243,7 +246,9 @@ class AbsTarget implements TargetInterface
      */
     public function initializeObject(): void
     {
-        $this->blobService = $this->blobServiceFactory->create();
+        $this->blobServiceClient = $this->blobServiceFactory->create();
+        $this->containerClient = $this->blobServiceClient->getContainerClient($this->containerName);
+
         if ($this->customBaseUriMethod !== []) {
             if (!$this->objectManager->isRegistered($this->customBaseUriMethod['objectName'])) {
                 throw new Exception(sprintf('Unknown object "%s" defined as custom base URI method in the configuration of the "%s" resource AbsTarget. Please check your settings.', $this->customBaseUriMethod['objectName'], $this->name), 1621597225);
@@ -306,16 +311,10 @@ class AbsTarget implements TargetInterface
         if (!isset($this->existingObjectsInfo)) {
             $this->existingObjectsInfo = [];
 
-            $listBlobsOptions = new ListBlobsOptions();
-            $listBlobsOptions->setPrefix($this->keyPrefix);
-            do {
-                $listBlobsResult = $this->blobService->listBlobs($this->containerName, $listBlobsOptions);
-                foreach ($listBlobsResult->getBlobs() as $blob) {
-                    $this->existingObjectsInfo[$blob->getName()] = true;
-                }
-
-                $listBlobsOptions->setContinuationToken($listBlobsResult->getContinuationToken());
-            } while ($listBlobsResult->getContinuationToken());
+            $options = new GetBlobsOptions();
+            foreach ($this->containerClient->getBlobs($this->keyPrefix, $options) as $blob) {
+                $this->existingObjectsInfo[$blob->name] = true;
+            }
         }
 
         $obsoleteObjects = $this->existingObjectsInfo;
@@ -333,11 +332,10 @@ class AbsTarget implements TargetInterface
         $this->logger->info(sprintf('Removing %s obsolete objects from target container "%s".', count($obsoleteObjects), $this->containerName), LogEnvironment::fromMethodName(__METHOD__));
         foreach (array_keys($obsoleteObjects) as $relativePathAndFilename) {
             try {
-                $this->blobService->deleteBlob($this->containerName, $this->keyPrefix . $relativePathAndFilename);
-            } catch (ServiceException $e) {
-                if ($e->getCode() !== 404) {
-                    throw $e;
-                }
+                $blobClient = $this->containerClient->getBlobClient($this->keyPrefix . $relativePathAndFilename);
+                $blobClient->delete();
+            } catch (BlobNotFoundException $e) {
+                // Ignore if blob doesn't exist
             }
         }
     }
@@ -370,12 +368,19 @@ class AbsTarget implements TargetInterface
                 $this->logger->debug(sprintf('Successfully copied resource as object "%s" (SHA1: %s) from container "%s" to container "%s" (with GZIP compression)', $targetObjectName, $object->getSha1() ?: 'unknown', $storageContainer, $this->containerName), LogEnvironment::fromMethodName(__METHOD__));
             } else {
                 $this->logger->debug(sprintf('Copy object "%s" to container "%s"', $targetObjectName, $this->containerName), LogEnvironment::fromMethodName(__METHOD__));
-                $setBlobPropertiesOptions = new SetBlobPropertiesOptions();
-                $setBlobPropertiesOptions->setContentType(MediaTypes::getMediaTypeFromFilename($targetObjectName));
                 try {
-                    $this->blobService->copyBlob($this->containerName, $targetObjectName, $storageContainer, $storage->getKeyPrefix() . $object->getSha1());
-                    $this->blobService->setBlobProperties($this->containerName, $targetObjectName, $setBlobPropertiesOptions);
-                } catch (ServiceException $e) {
+                    $sourceBlobClient = $this->blobServiceClient->getContainerClient($storageContainer)->getBlobClient($storage->getKeyPrefix() . $object->getSha1());
+                    $targetBlobClient = $this->containerClient->getBlobClient($targetObjectName);
+
+                    // Download from source
+                    $downloadResult = $sourceBlobClient->downloadStreaming();
+                    $content = $downloadResult->content;
+
+                    // Upload to target with correct MIME type
+                    $options = new UploadBlobOptions();
+                    $options->contentType = MediaTypes::getMediaTypeFromFilename($targetObjectName);
+                    $targetBlobClient->upload($content, $options);
+                } catch (\Exception $e) {
                     $this->messageCollector->append(sprintf('Could not copy resource with SHA1 hash %s of collection %s from container %s to %s: %s', $object->getSha1(), $collection->getName(), $storageContainer, $this->containerName, $e->getMessage()));
                     continue;
                 }
@@ -397,7 +402,7 @@ class AbsTarget implements TargetInterface
     public function getPublicStaticResourceUri($relativePathAndFilename): string
     {
         $relativePathAndFilename = $this->encodeRelativePathAndFilenameForUri($relativePathAndFilename);
-        return sprintf('https://%s.%s/%s/%s%s', $this->blobService->getAccountName(), Resources::BLOB_BASE_DNS_NAME, $this->containerName, $this->keyPrefix, $relativePathAndFilename);
+        return sprintf('https://%s.blob.core.windows.net/%s/%s%s', $this->blobServiceClient->uri->getHost(), $this->containerName, $this->keyPrefix, $relativePathAndFilename);
     }
 
     /**
@@ -421,12 +426,19 @@ class AbsTarget implements TargetInterface
         if ($storage instanceof AbsStorage && !in_array($resource->getMediaType(), $this->gzipCompressionMediaTypes, true)) {
             $targetObjectName = $this->keyPrefix . $this->getRelativePublicationPathAndFilename($resource);
 
-            $setBlobPropertiesOptions = new SetBlobPropertiesOptions();
-            $setBlobPropertiesOptions->setContentType(MediaTypes::getMediaTypeFromFilename($targetObjectName));
             try {
-                $this->blobService->copyBlob($this->containerName, $targetObjectName, $storageContainer, $storage->getKeyPrefix() . $resource->getSha1());
-                $this->blobService->setBlobProperties($this->containerName, $targetObjectName, $setBlobPropertiesOptions);
-            } catch (ServiceException $e) {
+                $sourceBlobClient = $this->blobServiceClient->getContainerClient($storageContainer)->getBlobClient($storage->getKeyPrefix() . $resource->getSha1());
+                $targetBlobClient = $this->containerClient->getBlobClient($targetObjectName);
+
+                // Download from source
+                $downloadResult = $sourceBlobClient->downloadStreaming();
+                $content = $downloadResult->content;
+
+                // Upload to target with correct MIME type
+                $options = new UploadBlobOptions();
+                $options->contentType = $resource->getMediaType();
+                $targetBlobClient->upload($content, $options);
+            } catch (\Exception $e) {
                 $this->messageCollector->append(sprintf('Could not copy resource with SHA1 hash %s of collection %s from container %s to %s: %s', $resource->getSha1(), $collection->getName(), $storageContainer, $this->containerName, $e->getMessage()), Error::SEVERITY_ERROR, 1621630147);
                 return;
             }
@@ -452,11 +464,10 @@ class AbsTarget implements TargetInterface
     {
         $objectName = $this->keyPrefix . $this->getRelativePublicationPathAndFilename($resource);
         try {
-            $this->blobService->deleteBlob($this->containerName, $objectName);
-        } catch (ServiceException $e) {
-            if ($e->getCode() !== 404) {
-                throw $e;
-            }
+            $blobClient = $this->containerClient->getBlobClient($objectName);
+            $blobClient->delete();
+        } catch (BlobNotFoundException $e) {
+            // Ignore if blob doesn't exist
         }
 
         $this->logger->debug(sprintf('Successfully unpublished resource as object "%s" (SHA1: %s) from container "%s"', $objectName, $resource->getSha1() ?: 'unknown', $this->containerName), LogEnvironment::fromMethodName(__METHOD__));
@@ -474,7 +485,7 @@ class AbsTarget implements TargetInterface
         $customUri = $this->persistentResourceUriPattern;
         if (empty($customUri)) {
             if (empty($baseUri)) {
-                $baseUri = sprintf('https://%s.%s/', $this->blobService->getAccountName(), Resources::BLOB_BASE_DNS_NAME);
+                $baseUri = sprintf('https://%s.blob.core.windows.net/', $this->getAccountNameFromServiceClient());
                 $customUri = '{baseUri}{containerName}/{keyPrefix}{sha1}/{filename}';
             } else {
                 $customUri = self::DEFAULT_PERSISTENT_RESOURCE_URI_PATTERN;
@@ -509,9 +520,7 @@ class AbsTarget implements TargetInterface
     {
         $objectName = $this->keyPrefix . $relativeTargetPathAndFilename;
 
-        $blobOptions = new CreateBlockBlobOptions();
-        $blobOptions->setContentType($metaData->getMediaType());
-        $blobOptions->setCacheControl('public, max-age=1209600');
+        $options = new UploadBlobOptions(contentType: $metaData->getMediaType());
 
         if (in_array($metaData->getMediaType(), $this->gzipCompressionMediaTypes, true)) {
             try {
@@ -525,7 +534,6 @@ class AbsTarget implements TargetInterface
 
                 /** @noinspection CallableParameterUseCaseInTypeContextInspection */
                 $sourceStream = fopen($temporaryTargetPathAndFilename, 'rb');
-                $blobOptions->setContentEncoding('gzip');
 
                 $this->logger->debug(sprintf('Converted resource data of object "%s" in container "%s" with SHA1 hash "%s" to GZIP with level %s.', $objectName, $this->containerName, $metaData->getSha1() ?: 'unknown', $this->gzipCompressionLevel), LogEnvironment::fromMethodName(__METHOD__));
             } catch (\Exception $e) {
@@ -534,12 +542,8 @@ class AbsTarget implements TargetInterface
         }
 
         try {
-            $this->blobService->createBlockBlob(
-                $this->containerName,
-                $objectName,
-                $sourceStream,
-                $blobOptions
-            );
+            $blobClient = $this->containerClient->getBlobClient($objectName);
+            $blobClient->upload($sourceStream, $options);
             $this->logger->debug(sprintf('Successfully published resource as object "%s" in container "%s" with SHA1 hash "%s"', $objectName, $this->containerName, $metaData->getSha1() ?: 'unknown'), LogEnvironment::fromMethodName(__METHOD__));
         } catch (\Exception $e) {
             $this->messageCollector->append(sprintf('Failed publishing resource as object "%s" in container "%s" with SHA1 hash "%s": %s', $objectName, $this->containerName, $metaData->getSha1() ?: 'unknown', $e->getMessage()), Error::SEVERITY_WARNING, 1621598556);
@@ -590,5 +594,14 @@ class AbsTarget implements TargetInterface
             $storage->getContainerName() === $this->containerName
         );
     }
-}
 
+    /**
+     * Extract account name from the blob service client URI
+     */
+    private function getAccountNameFromServiceClient(): string
+    {
+        $host = $this->blobServiceClient->uri->getHost();
+        // Extract account name from host like "accountname.blob.core.windows.net"
+        return explode('.', $host)[0];
+    }
+}

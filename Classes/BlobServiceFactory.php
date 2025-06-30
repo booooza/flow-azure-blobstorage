@@ -13,17 +13,17 @@ namespace Flownative\Azure\BlobStorage;
  * source code.
  */
 
-use MicrosoftAzure\Storage\Blob\BlobRestProxy;
 use Neos\Flow\Annotations as Flow;
+use AzureOss\Storage\Blob\BlobServiceClient;
 
 /**
- * Factory for the Azure BlobRestProxy "blob service" class
+ * Factory for the Azure BlobServiceClient class
  *
  * @Flow\Scope("singleton")
  */
 class BlobServiceFactory
 {
-    private const CONNECTIONSTRING_TEMPLATE = 'DefaultEndpointsProtocol=https;AccountName=%1$s;AccountKey=%2$s';
+    private const CONNECTIONSTRING_TEMPLATE = 'DefaultEndpointsProtocol=https;AccountName=%1$s;AccountKey=%2$s;EndpointSuffix=core.windows.net';
 
     /**
      * @Flow\InjectConfiguration
@@ -32,11 +32,11 @@ class BlobServiceFactory
     protected $configuration;
 
     /**
-     * Creates a new BlobRestProxy instance and authenticates against the Azure API
+     * Creates a new BlobServiceClient instance and authenticates against the Azure API
      *
      * @throws Exception
      */
-    public function create(string $credentialsProfileName = 'default'): BlobRestProxy
+    public function create(string $credentialsProfileName = 'default'): BlobServiceClient
     {
         if (!isset($this->configuration['profiles'][$credentialsProfileName])) {
             throw new Exception(sprintf('The specified Azure Blob Storage credentials profile "%s" does not exist, please check your settings.', $credentialsProfileName), 1621592468);
@@ -51,7 +51,6 @@ class BlobServiceFactory
                 $this->configuration['profiles'][$credentialsProfileName]['credentials']['accountKey']
             );
         }
-
-        return BlobRestProxy::createBlobService($connectionString);
+        return BlobServiceClient::fromConnectionString($connectionString);
     }
 }

@@ -13,9 +13,10 @@ namespace Flownative\Azure\BlobStorage;
  * source code.
  */
 
-use MicrosoftAzure\Storage\Blob\BlobRestProxy;
-use MicrosoftAzure\Storage\Blob\Models\CreateBlockBlobOptions;
-use MicrosoftAzure\Storage\Common\Exceptions\ServiceException;
+use AzureOss\Storage\Blob\BlobServiceClient;
+use AzureOss\Storage\Blob\BlobContainerClient;
+use AzureOss\Storage\Blob\Models\UploadBlobOptions;
+use AzureOss\Storage\Blob\Exceptions\BlobNotFoundException;
 use Neos\Flow\Annotations as Flow;
 use Neos\Flow\Log\Utility\LogEnvironment;
 use Neos\Flow\ResourceManagement\CollectionInterface;
@@ -72,9 +73,14 @@ class AbsStorage implements WritableStorageInterface
     protected $blobServiceFactory;
 
     /**
-     * @var BlobRestProxy
+     * @var BlobServiceClient
      */
-    protected $blobService;
+    protected $blobServiceClient;
+
+    /**
+     * @var BlobContainerClient
+     */
+    protected $containerClient;
 
     /**
      * @Flow\Inject
@@ -96,10 +102,10 @@ class AbsStorage implements WritableStorageInterface
             switch ($key) {
                 case 'container':
                     $this->containerName = $value;
-                break;
+                    break;
                 case 'keyPrefix':
                     $this->keyPrefix = ltrim($value, '/');
-                break;
+                    break;
                 default:
                     if ($value !== null) {
                         throw new Exception(sprintf('An unknown option "%s" was specified in the configuration of the "%s" resource AbsStorage. Please check your settings.', $key, $name), 1621582717);
@@ -119,7 +125,8 @@ class AbsStorage implements WritableStorageInterface
      */
     public function initializeObject(): void
     {
-        $this->blobService = $this->blobServiceFactory->create();
+        $this->blobServiceClient = $this->blobServiceFactory->create();
+        $this->containerClient = $this->blobServiceClient->getContainerClient($this->containerName);
     }
 
     /**
@@ -216,13 +223,10 @@ class AbsStorage implements WritableStorageInterface
         $resource->setCollectionName($collectionName);
         $resource->setSha1($sha1Hash);
 
-        $blobOptions = new CreateBlockBlobOptions();
-        $this->blobService->createBlockBlob(
-            $this->getContainerName(),
-            $this->keyPrefix . $sha1Hash,
-            $content,
-            $blobOptions
-        );
+        $blobClient = $this->containerClient->getBlobClient($this->keyPrefix . $sha1Hash);
+        $uploadBlobOptions = new UploadBlobOptions();
+        $uploadBlobOptions->contentType = $resource->getMediaType();
+        $blobClient->upload($content, $uploadBlobOptions);
 
         return $resource;
     }
@@ -265,11 +269,10 @@ class AbsStorage implements WritableStorageInterface
         $resource->setSha1($sha1Hash);
 
         try {
-            $blobOptions = new CreateBlockBlobOptions();
-            $blobOptions->setContentType($resource->getMediaType());
-            $this->blobService->createBlockBlob(
-                $this->getContainerName(),
-                $this->keyPrefix . $sha1Hash,
+            $blobClient = $this->containerClient->getBlobClient($this->keyPrefix . $sha1Hash);
+            $blobOptions = new UploadBlobOptions();
+            $blobOptions->contentType = $resource->getMediaType();
+            $blobClient->upload(
                 fopen($newSourcePathAndFilename, 'rb'),
                 $blobOptions
             );
@@ -292,17 +295,16 @@ class AbsStorage implements WritableStorageInterface
     public function deleteResource(PersistentResource $resource): bool
     {
         try {
-            $this->blobService->deleteBlob($this->getContainerName(), $this->keyPrefix . $resource->getSha1());
+            $blobClient = $this->containerClient->getBlobClient($this->keyPrefix . $resource->getSha1());
+            $blobClient->delete();
             return true;
+        } catch (BlobNotFoundException $e) {
+            return false;
         } catch (\Exception $e) {
-            if ($e->getCode() === 404) {
-                return false;
-            }
+            $message = sprintf('Azure Blob Storage: Could not delete blob for resource %s (/%s/%s%s). %s', $resource->getFilename(), $this->containerName, $this->keyPrefix, $resource->getSha1(), $e->getMessage());
+            $this->logger->error($message, LogEnvironment::fromMethodName(__METHOD__));
+            throw new Exception($message, 1621627220);
         }
-
-        $message = sprintf('Azure Blob Storage: Could not delete blob for resource %s (/%s/%s%s). %s', $resource->getFilename(), $this->containerName, $this->keyPrefix, $resource->getSha1(), $e->getMessage());
-        $this->logger->error($message, LogEnvironment::fromMethodName(__METHOD__));
-        throw new Exception($message, 1621627220);
     }
 
     /**
@@ -317,13 +319,12 @@ class AbsStorage implements WritableStorageInterface
     public function getStreamByResource(PersistentResource $resource)
     {
         try {
-            $blob = $this->blobService->getBlob($this->getContainerName(), $this->keyPrefix . $resource->getSha1());
-            return $blob->getContentStream();
+            $blobClient = $this->containerClient->getBlobClient($this->keyPrefix . $resource->getSha1());
+            $result = $blobClient->downloadStreaming();
+            return $result->content->detach();
+        } catch (BlobNotFoundException $e) {
+            return false;
         } catch (\Exception $e) {
-            if ($e->getCode() === 404) {
-                return false;
-            }
-
             $message = sprintf('Azure Blob Storage: Could not retrieve stream for resource %s (/%s/%s%s). %s', $resource->getFilename(), $this->containerName, $this->keyPrefix, $resource->getSha1(), $e->getMessage());
             $this->logger->error($message, LogEnvironment::fromMethodName(__METHOD__));
             throw new Exception($message, 1621596208, $e);
@@ -342,13 +343,12 @@ class AbsStorage implements WritableStorageInterface
     public function getStreamByResourcePath($relativePath)
     {
         try {
-            $blob = $this->blobService->getBlob($this->getContainerName(), $this->keyPrefix . ltrim($relativePath, '/'));
-            return $blob->getContentStream();
+            $blobClient = $this->containerClient->getBlobClient($this->keyPrefix . ltrim($relativePath, '/'));
+            $result = $blobClient->downloadStreaming();
+            return $result->content->detach();
+        } catch (BlobNotFoundException $e) {
+            return false;
         } catch (\Exception $e) {
-            if ($e->getCode() === 404) {
-                return false;
-            }
-
             $message = sprintf('Azure Blob Storage: Could not retrieve stream for resource (/%s/%s%s). %s', $this->containerName, $this->keyPrefix, ltrim($relativePath, '/'), $e->getMessage());
             $this->logger->error($message, LogEnvironment::fromMethodName(__METHOD__));
             throw new Exception($message, 1621596215);
@@ -380,9 +380,8 @@ class AbsStorage implements WritableStorageInterface
     public function getObjectsByCollection(CollectionInterface $collection): array
     {
         $objects = [];
-        $blobService = $this->blobService;
+        $containerClient = $this->containerClient;
         $keyPrefix = $this->keyPrefix;
-        $container = $this->getContainerName();
 
         /** @noinspection PhpUndefinedMethodInspection */
         foreach ($this->resourceRepository->findByCollectionName($collection->getName()) as $resource) {
@@ -390,9 +389,10 @@ class AbsStorage implements WritableStorageInterface
             $object = new StorageObject();
             $object->setFilename($resource->getFilename());
             $object->setSha1($resource->getSha1());
-            $object->setStream(static function () use ($blobService, $keyPrefix, $container, $resource) {
-                $blob = $blobService->getBlob($container, $keyPrefix . $resource->getSha1());
-                return $blob->getContentStream();
+            $object->setStream(static function () use ($containerClient, $keyPrefix, $resource) {
+                $blobClient = $containerClient->getBlobClient($keyPrefix . $resource->getSha1());
+                $result = $blobClient->downloadStreaming();
+                return $result->content->detach();
             });
             $objects[] = $object;
         }
@@ -418,28 +418,21 @@ class AbsStorage implements WritableStorageInterface
         $resource->setSha1($sha1Hash);
 
         try {
-            $this->blobService->getBlobMetadata($this->containerName, $this->keyPrefix . $sha1Hash);
-            $this->logger->info(sprintf('Azure Blob Storage: Did not import resource as object "%s" into container "%s" because that object already existed.', $sha1Hash, $this->containerName), LogEnvironment::fromMethodName(__METHOD__));
-        } catch (ServiceException $e) {
-            if ($e->getCode() !== 404) {
-                throw $e;
-            }
-            try {
-                $createBlobOptions = new CreateBlockBlobOptions();
-                $createBlobOptions->setContentType($resource->getMediaType());
-                $this->blobService->createBlockBlob(
-                    $this->containerName,
-                    $this->keyPrefix . $sha1Hash,
-                    fopen($temporaryPathAndFilename, 'rb'),
-                    $createBlobOptions
-                );
-            } catch (\Exception $exception) {
-                $this->logger->error(sprintf('Azure Blob Storage: Failed importing the temporary file into storage collection "%s": %s', $collectionName, $exception->getMessage()), LogEnvironment::fromMethodName(__METHOD__));
-                throw $exception;
-            }
+            $blobClient = $this->containerClient->getBlobClient($this->keyPrefix . $sha1Hash);
 
-            $this->logger->info(sprintf('Azure Blob Storage: Successfully imported resource as object "%s" into container "%s" with SHA1 hash "%s"', $sha1Hash, $this->containerName, $resource->getSha1() ?: 'unknown'), LogEnvironment::fromMethodName(__METHOD__));
+            // Check if blob already exists
+            if ($blobClient->exists()) {
+                $this->logger->info(sprintf('Azure Blob Storage: Did not import resource as object "%s" into container "%s" because that object already existed.', $sha1Hash, $this->containerName), LogEnvironment::fromMethodName(__METHOD__));
+            } else {
+                $uploadBlobOptions = new UploadBlobOptions();
+                $uploadBlobOptions->contentType = $resource->getMediaType();
+                $blobClient->upload(fopen($temporaryPathAndFilename, 'rb'), $uploadBlobOptions);
+            }
+        } catch (\Exception $exception) {
+            $this->logger->error(sprintf('Azure Blob Storage: Failed importing the temporary file into storage collection "%s": %s', $collectionName, $exception->getMessage()), LogEnvironment::fromMethodName(__METHOD__));
+            throw $exception;
         }
+        $this->logger->info(sprintf('Azure Blob Storage: Successfully imported resource as object "%s" into container "%s" with SHA1 hash "%s"', $sha1Hash, $this->containerName, $resource->getSha1() ?: 'unknown'), LogEnvironment::fromMethodName(__METHOD__));
 
         return $resource;
     }
