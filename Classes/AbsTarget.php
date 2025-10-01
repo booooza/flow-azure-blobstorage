@@ -19,6 +19,7 @@ use AzureOss\Storage\Blob\BlobServiceClient;
 use AzureOss\Storage\Blob\BlobContainerClient;
 use AzureOss\Storage\Blob\Models\UploadBlobOptions;
 use AzureOss\Storage\Blob\Models\GetBlobsOptions;
+use AzureOss\Storage\Blob\Models\BlobHttpHeaders;
 use AzureOss\Storage\Blob\Exceptions\BlobNotFoundException;
 use Neos\Error\Messages\Error;
 use Neos\Flow\Annotations as Flow;
@@ -372,14 +373,10 @@ class AbsTarget implements TargetInterface
                     $sourceBlobClient = $this->blobServiceClient->getContainerClient($storageContainer)->getBlobClient($storage->getKeyPrefix() . $object->getSha1());
                     $targetBlobClient = $this->containerClient->getBlobClient($targetObjectName);
 
-                    // Download from source
-                    $downloadResult = $sourceBlobClient->downloadStreaming();
-                    $content = $downloadResult->content;
-
-                    // Upload to target with correct MIME type
-                    $options = new UploadBlobOptions();
-                    $options->contentType = MediaTypes::getMediaTypeFromFilename($targetObjectName);
-                    $targetBlobClient->upload($content, $options);
+                    $targetBlobClient->startCopyFromUri($sourceBlobClient->uri);
+                    $targetBlobClient->setHttpHeaders(new BlobHttpHeaders(
+                        contentType: MediaTypes::getMediaTypeFromFilename($targetObjectName),
+                    ));
                 } catch (\Exception $e) {
                     $this->messageCollector->append(sprintf('Could not copy resource with SHA1 hash %s of collection %s from container %s to %s: %s', $object->getSha1(), $collection->getName(), $storageContainer, $this->containerName, $e->getMessage()));
                     continue;
@@ -430,14 +427,10 @@ class AbsTarget implements TargetInterface
                 $sourceBlobClient = $this->blobServiceClient->getContainerClient($storageContainer)->getBlobClient($storage->getKeyPrefix() . $resource->getSha1());
                 $targetBlobClient = $this->containerClient->getBlobClient($targetObjectName);
 
-                // Download from source
-                $downloadResult = $sourceBlobClient->downloadStreaming();
-                $content = $downloadResult->content;
-
-                // Upload to target with correct MIME type
-                $options = new UploadBlobOptions();
-                $options->contentType = $resource->getMediaType();
-                $targetBlobClient->upload($content, $options);
+                $targetBlobClient->startCopyFromUri($sourceBlobClient->uri);
+                $targetBlobClient->setHttpHeaders(new BlobHttpHeaders(
+                    contentType: $resource->getMediaType(),
+                ));
             } catch (\Exception $e) {
                 $this->messageCollector->append(sprintf('Could not copy resource with SHA1 hash %s of collection %s from container %s to %s: %s', $resource->getSha1(), $collection->getName(), $storageContainer, $this->containerName, $e->getMessage()), Error::SEVERITY_ERROR, 1621630147);
                 return;
