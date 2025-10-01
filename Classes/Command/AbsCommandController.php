@@ -13,6 +13,7 @@ namespace Flownative\Azure\BlobStorage\Command;
  * source code.
  */
 
+use AzureOss\Storage\Blob\Models\BlobHttpHeaders;
 use Doctrine\Common\Persistence\ObjectManager as DoctrineObjectManager;
 use Doctrine\DBAL\Driver\Exception as DbalDriverException;
 use Doctrine\ORM\EntityManagerInterface;
@@ -190,32 +191,11 @@ final class AbsCommandController extends CommandController
                 }
                 $previousSha1 = $resourceRecord['sha1'];
 
+                $blobHttpHeaders = new BlobHttpHeaders(contentType: $resourceRecord['mediatype']);
                 try {
                     $blobClient = $containerClient->getBlobClient($targetKeyPrefix . $resourceRecord['sha1'] . '/' . $resourceRecord['filename']);
-
-                    // Get current blob properties
-                    $properties = $blobClient->getProperties();
-                    $currentContentType = $properties->contentType;
-                    $expectedContentType = $resourceRecord['mediatype'];
-
-                    if ($currentContentType === $expectedContentType) {
-                        $this->outputLine('   ✅  %s %s (content-type: %s)', [$resourceRecord['sha1'], $resourceRecord['filename'], $currentContentType]);
-                    } else {
-                        // Content type mismatch - we need to re-upload the blob with correct content type
-                        $this->outputLine('   🔄  %s %s (updating content-type from "%s" to "%s")', [$resourceRecord['sha1'], $resourceRecord['filename'], $currentContentType, $expectedContentType]);
-
-                        // Download current content
-                        $downloadResult = $blobClient->downloadStreaming();
-                        $content = $downloadResult->content;
-
-                        // Re-upload with correct content type
-                        $options = new \AzureOss\Storage\Blob\Models\UploadBlobOptions(contentType: $expectedContentType);
-                        $blobClient->upload($content, $options);
-
-                        $this->outputLine('   ✅  %s %s (content-type updated)', [$resourceRecord['sha1'], $resourceRecord['filename']]);
-                    }
-                } catch (\AzureOss\Storage\Blob\Exceptions\BlobNotFoundException $exception) {
-                    $this->outputLine('   ❌  <error>%s %s (not found)</error>', [$resourceRecord['sha1'], $resourceRecord['filename']]);
+                    $blobClient->setHttpHeaders($blobHttpHeaders);
+                    $this->outputLine('   ✅  %s %s ', [$resourceRecord['sha1'], $resourceRecord['filename']]);
                 } catch (\Exception $exception) {
                     $this->outputLine('   ❌  <error>%s %s</error>', [$resourceRecord['sha1'], $resourceRecord['filename']]);
                     $this->outputLine('      %s', [$exception->getMessage()]);
